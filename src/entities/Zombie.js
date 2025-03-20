@@ -1,479 +1,601 @@
-// src/entities/Zombie.js
-import { Vector3, AnimationMixer, Clock, Euler, LoopOnce, LoopRepeat, SkeletonHelper, 
-    Box3, BoxGeometry, MeshStandardMaterial, Mesh, Color } from 'three';
-import { PhysicsBody } from '../physics/PhysicsBody.js';
+// src/entities/Zombie.js - Fixed version with proper physics and behaviors
+import { 
+    Vector3, AnimationMixer, Clock, Euler, Quaternion,
+    MeshStandardMaterial, Color, BoxGeometry, Mesh, Group,
+    SkeletonHelper, AnimationClip
+} from 'three';
+import { clone as skeletonClone } from 'three/addons/utils/SkeletonUtils.js';
+import { PhysicsBody } from '../physics/PhysicsBody.js'; // Correctly import PhysicsBody
+
+// Import Three.js constants for animation
+const LoopOnce = 2200; // THREE.LoopOnce
+const LoopRepeat = 2201; // THREE.LoopRepeat
 
 export class Zombie {
-constructor(engine, position = new Vector3(0, 0, 0)) {
-   this.engine = engine;
-   this.type = 'zombie';
-   this.id = null; // Will be assigned by EntityManager
-   this.position = position.clone();
-   this.rotation = new Euler(0, 0, 0);
-   this.enabled = true;
-   
-   // Zombie state
-   this.state = 'idle'; // idle, chase, attack, death
-   this.health = 100;
-   this.speed = {
-       walk: 2.0,
-       run: 4.5,
-       crawl: 1.0
-   };
-   this.damage = 20;
-   this.attackRange = 1.8;
-   this.detectionRange = 15;
-   this.attackCooldown = 1.2; // seconds
-   this.lastAttackTime = 0;
-   this.timeSinceLastStateChange = 0;
-   this.targetPosition = null;
-   this.isAlive = true;
-   
-   // Physics
-   this.physicsBody = new PhysicsBody({
-       position: this.position.clone(),
-       mass: 70,
-       radius: 0.5,
-       restitution: 0.2,
-       friction: 0.5
-   });
-   
-   // Animation properties
-   this.object = null; // 3D model object
-   this.mixer = null; // Animation mixer
-   this.animations = {}; // Animation clips
-   this.currentAnimation = null;
-   this.animationClock = new Clock();
-   this.skeletonHelper = null; // Debug helper for skeleton
-   this.debugMesh = null; // Fallback visual representation
-}
-
-async init(engine) {
-   // Add physics body to world
-   this.engine.physics.addBody(this.physicsBody);
-   
-   // Load zombie model and animations
-   await this.loadModel();
-   
-   // Start in idle state
-   this.changeState('idle');
-   
-   return this; // Return self for chaining
-}
-
-async loadModel() {
-   try {
-       // Get the zombie model (already loaded by ZombieAssetLoader)
-       const zombieModel = this.engine.assetManager.getModel('zombie');
-       
-       if (!zombieModel) {
-           console.error("Zombie model not loaded or not found!");
-           this.createDebugMesh(); // Create a placeholder if model isn't found
-           return;
-       }
-       
-       // Clone the FBX model properly
-       this.object = zombieModel.clone();
-       
-       // CRITICAL: Set the proper scale for the zombie - FBX models are typically very large
-       this.object.scale.set(0.01, 0.01, 0.01);
-       
-       // Position at physics body location
-       this.object.position.copy(this.position);
-       
-       // Flag to check if any visible meshes were found
-       let hasVisibleMeshes = false;
-       
-       // Process all child meshes to ensure they're visible
-       this.object.traverse(node => {
-           if (node.isMesh) {
-               node.castShadow = true;
-               node.receiveShadow = true;
-               
-               if (node.material) {
-                   // Fix material properties
-                   if (Array.isArray(node.material)) {
-                       node.material.forEach(mat => {
-                           mat.transparent = false;
-                           mat.opacity = 1.0;
-                           mat.visible = true;
-                           mat.needsUpdate = true;
-                       });
-                   } else {
-                       node.material.transparent = false;
-                       node.material.opacity = 1.0;
-                       node.material.visible = true;
-                       node.material.needsUpdate = true;
-                   }
-                   
-                   hasVisibleMeshes = true;
-               }
-           }
-       });
-       
-       // If no visible mesh was found, create a debug mesh
-       if (!hasVisibleMeshes) {
-           this.createDebugMesh();
-       }
-       
-       // Create animation mixer for this instance
-       this.mixer = new AnimationMixer(this.object);
-       
-       // Map animation IDs to internal names
-       const animationMap = {
-           'zombie_idle': 'idle',
-           'zombie_walk': 'walk',
-           'zombie_run': 'run',
-           'zombie_attack': 'attack',
-           'zombie_death': 'death'
-       };
-       
-       // Get animations from asset manager and store them
-       for (const [animId, animName] of Object.entries(animationMap)) {
-           const anim = this.engine.assetManager.getAnimation(animId);
-           if (anim) {
-               // Store the animation
-               this.animations[animName] = anim;
-               console.log(`Animation ${animName} loaded for zombie`);
-           } else {
-               console.warn(`Animation ${animId} not found in asset manager`);
-           }
-       }
-       
-       // Add skeleton helper for debugging if debug is enabled
-       if (this.engine.config.debug) {
-           this.skeletonHelper = new SkeletonHelper(this.object);
-           this.engine.renderer.scene.add(this.skeletonHelper);
-       }
-       
-       // Add to scene
-       this.engine.renderer.scene.add(this.object);
-       
-       console.log("Zombie model loaded successfully");
-       
-   } catch (error) {
-       console.error("Failed to load zombie model:", error);
-       this.createDebugMesh(); // Create placeholder on error
-   }
-}
-
-// Create a simple debug mesh to represent the zombie
-createDebugMesh() {
-   // Create a green humanoid shape as placeholder
-   const bodyGeo = new BoxGeometry(0.5, 1.0, 0.3);
-   const headGeo = new BoxGeometry(0.3, 0.3, 0.3);
-   const limbGeo = new BoxGeometry(0.15, 0.5, 0.15);
-   
-   const material = new MeshStandardMaterial({ color: new Color(0x00aa00) });
-   
-   // Create zombie object if it doesn't exist
-   if (!this.object) {
-       this.object = new Mesh();
-       this.object.position.copy(this.position);
-   }
-   
-   // Body
-   const body = new Mesh(bodyGeo, material);
-   body.position.y = 0.5;
-   this.object.add(body);
-   
-   // Head
-   const head = new Mesh(headGeo, material);
-   head.position.y = 1.15;
-   this.object.add(head);
-   
-   // Arms
-   const leftArm = new Mesh(limbGeo, material);
-   leftArm.position.set(-0.325, 0.5, 0);
-   this.object.add(leftArm);
-   
-   const rightArm = new Mesh(limbGeo, material);
-   rightArm.position.set(0.325, 0.5, 0);
-   this.object.add(rightArm);
-   
-   // Legs
-   const leftLeg = new Mesh(limbGeo, material);
-   leftLeg.position.set(-0.2, -0.25, 0);
-   this.object.add(leftLeg);
-   
-   const rightLeg = new Mesh(limbGeo, material);
-   rightLeg.position.set(0.2, -0.25, 0);
-   this.object.add(rightLeg);
-   
-   // Create a simple mixer if needed
-   if (!this.mixer) {
-       this.mixer = new AnimationMixer(this.object);
-   }
-   
-   // Add to scene
-   this.engine.renderer.scene.add(this.object);
-   
-   console.log("Created debug mesh for zombie");
-}
-
-update(deltaTime) {
-   // Skip if disabled or not initialized
-   if (!this.enabled || !this.object) return;
-   
-   // Update animation mixer
-   if (this.mixer) {
-       this.mixer.update(deltaTime);
-   }
-   
-   // NOTE: SkeletonHelper doesn't need to be updated manually
-   
-   // Update position from physics
-   this.position.copy(this.physicsBody.position);
-   
-   // Apply position to model
-   this.object.position.copy(this.position);
-   
-   // Update state timers
-   this.timeSinceLastStateChange += deltaTime;
-   
-   // Process AI behavior based on current state
-   switch (this.state) {
-       case 'idle':
-           this.processIdleState(deltaTime);
-           break;
-       case 'chase':
-           this.processChaseState(deltaTime);
-           break;
-       case 'attack':
-           this.processAttackState(deltaTime);
-           break;
-       case 'death':
-           this.processDeathState(deltaTime);
-           break;
-   }
-   
-   // Check if zombie is dead
-   if (this.health <= 0 && this.state !== 'death') {
-       this.changeState('death');
-   }
-}
-
-processIdleState(deltaTime) {
-   // Check if player is within detection range
-   const player = this.engine.player;
-   if (!player) return;
-   
-   const distanceToPlayer = this.position.distanceTo(player.position);
-   
-   if (distanceToPlayer < this.detectionRange) {
-       // Player detected, start chasing
-       this.changeState('chase');
-   }
-   
-   // Occasionally change rotation to look around
-   if (Math.random() < 0.01) {
-       const randomAngle = Math.random() * Math.PI * 2;
-       this.rotation.y = randomAngle;
-       this.object.rotation.y = randomAngle;
-   }
-}
-
-processChaseState(deltaTime) {
-   const player = this.engine.player;
-   if (!player) return;
-   
-   // Calculate distance to player
-   const distanceToPlayer = this.position.distanceTo(player.position);
-   
-   // If player is out of detection range, go back to idle
-   if (distanceToPlayer > this.detectionRange * 1.5) {
-       this.changeState('idle');
-       return;
-   }
-   
-   // If close enough to attack
-   if (distanceToPlayer < this.attackRange) {
-       this.changeState('attack');
-       return;
-   }
-   
-   // Move towards player
-   const direction = new Vector3()
-       .subVectors(player.position, this.position)
-       .normalize();
-       
-   // Set rotation to face player
-   this.lookAt(player.position);
-   
-   // Determine speed based on distance
-   let speed = this.speed.walk;
-   if (distanceToPlayer < this.detectionRange * 0.5) {
-       speed = this.speed.run; // Run when closer
-   }
-   
-   // Apply movement force
-   const moveForce = direction.clone().multiplyScalar(speed * 60 * deltaTime);
-   this.physicsBody.velocity.x = moveForce.x;
-   this.physicsBody.velocity.z = moveForce.z;
-   
-   // Update animation based on speed
-   if (speed === this.speed.run) {
-       this.playAnimation('run');
-   } else {
-       this.playAnimation('walk');
-   }
-}
-
-processAttackState(deltaTime) {
-   const player = this.engine.player;
-   if (!player) return;
-   
-   // Calculate distance to player
-   const distanceToPlayer = this.position.distanceTo(player.position);
-   
-   // If player moved away, go back to chase
-   if (distanceToPlayer > this.attackRange * 1.2) {
-       this.changeState('chase');
-       return;
-   }
-   
-   // Face the player
-   this.lookAt(player.position);
-   
-   // Attack cooldown
-   const currentTime = performance.now() / 1000;
-   if (currentTime - this.lastAttackTime > this.attackCooldown) {
-       this.lastAttackTime = currentTime;
-       this.attack(player);
-       
-       // Play attack animation
-       this.playAnimation('attack', false); // non-looping attack animation
-   }
-}
-
-processDeathState(deltaTime) {
-   // Death animation played once
-   if (this.timeSinceLastStateChange > 2.0 && this.isAlive) {
-       this.isAlive = false;
-       
-       // Start removing the zombie after a delay
-       setTimeout(() => {
-           // Request removal
-           if (this.engine.entityManager) {
-               this.engine.entityManager.removeEntity(this);
-           }
-       }, 3000);
-   }
-}
-
-attack(player) {
-   // Deal damage to player
-   if (player.takeDamage) {
-       player.takeDamage(this.damage);
-   }
-   console.log("Zombie attacks player for", this.damage, "damage!");
-}
-
-takeDamage(amount) {
-   if (!this.isAlive) return;
-   
-   this.health -= amount;
-   console.log(`Zombie took ${amount} damage. Health: ${this.health}`);
-   
-   // Check if zombie died
-   if (this.health <= 0) {
-       this.changeState('death');
-   }
-}
-
-changeState(newState) {
-   // Skip if already in this state
-   if (newState === this.state) return;
-   
-   // Update state
-   const prevState = this.state;
-   this.state = newState;
-   this.timeSinceLastStateChange = 0;
-   
-   // Perform state-specific transitions
-   switch (newState) {
-       case 'idle':
-           this.playAnimation('idle');
-           break;
-       case 'chase':
-           this.playAnimation(Math.random() < 0.5 ? 'run' : 'walk');
-           break;
-       case 'attack':
-           this.playAnimation('attack', false);
-           break;
-       case 'death':
-           this.playAnimation('death', false);
-           // Stop movement
-           this.physicsBody.velocity.set(0, 0, 0);
-           break;
-   }
-   
-   // Debug log
-   console.log(`Zombie state changed: ${prevState} -> ${newState}`);
-}
-
-playAnimation(name, loop = true) {
-   // Skip if no mixer or animation doesn't exist
-   if (!this.mixer) {
-       console.warn("Cannot play animation - mixer not initialized");
-       return;
-   }
-   
-   const clip = this.animations[name];
-   if (!clip) {
-       console.warn(`Animation '${name}' not found for zombie`);
-       return;
-   }
-   
-   // Stop any current animation with a short blend
-   if (this.currentAnimation) {
-       this.currentAnimation.fadeOut(0.2);
-   }
-   
-   // Create new action
-   this.currentAnimation = this.mixer.clipAction(clip);
-   this.currentAnimation.reset();
-   this.currentAnimation.loop = loop ? LoopRepeat : LoopOnce;
-   this.currentAnimation.clampWhenFinished = !loop;
-   this.currentAnimation.timeScale = 1.0; // Normal speed
-   this.currentAnimation.fadeIn(0.2);
-   this.currentAnimation.play();
-   
-   console.log(`Playing zombie animation: ${name}`);
-}
-
-lookAt(target) {
-   // Calculate direction to target
-   const direction = new Vector3()
-       .subVectors(target, this.position)
-       .normalize();
-       
-   // Only rotate on Y axis (horizontal plane)
-   this.rotation.y = Math.atan2(direction.x, direction.z);
-   this.object.rotation.y = this.rotation.y;
-}
-
-destroy() {
-   // Clean up resources
-   
-   // Remove skeleton helper if it exists
-   if (this.skeletonHelper) {
-       this.engine.renderer.scene.remove(this.skeletonHelper);
-   }
-   
-   // Remove from scene
-   if (this.object) {
-       this.engine.renderer.scene.remove(this.object);
-   }
-   
-   // Remove physics body
-   if (this.physicsBody) {
-       this.engine.physics.removeBody(this.physicsBody);
-   }
-   
-   // Dispose animations
-   if (this.mixer) {
-       this.mixer.stopAllAction();
-   }
-}
+    constructor(engine, position = new Vector3(0, 0, 0)) {
+        // Core properties
+        this.engine = engine;
+        this.type = 'zombie';
+        this.id = null; // Will be assigned by EntityManager
+        this.position = position.clone();
+        this.rotation = new Euler(0, 0, 0);
+        this.quaternion = new Quaternion();
+        this.enabled = true;
+        this.isAlive = true;
+        
+        // FIXED: Proper physics body implementation
+        this.physicsBody = new PhysicsBody({
+            position: this.position.clone(),
+            mass: 70,
+            radius: 0.5,
+            restitution: 0.2,
+            friction: 0.5
+        });
+        
+        // State management for chasing
+        this.state = 'idle';
+        this.lastStateChangeTime = 0;
+        this.timeInCurrentState = 0;
+        this.timeSinceSpawn = 0;
+        
+        // Movement properties
+        this.speed = { walk: 2.0, run: 4.0 };
+        this.currentSpeed = 0;
+        this.moveDirection = new Vector3();
+        this.turnSpeed = 4.0;
+        
+        // Player tracking
+        this.canSeePlayer = false;
+        this.detectionRange = 15; // How far away zombie can detect player
+        this.updatePerceptionTime = 0;
+        this.perceptionUpdateRate = 0.2;
+        this.lastKnownPlayerPosition = null;
+        
+        // Combat properties
+        this.health = 100;
+        this.maxHealth = 100;
+        this.attackRange = 1.8;
+        this.attackCooldown = 1.2;
+        this.lastAttackTime = 0;
+        
+        // Animation properties
+        this.object = null;
+        this.mixer = null;
+        this.animations = {};
+        this.currentAnimation = null;
+        this.animationSpeed = 1.0;
+        this.skeletonHelper = null;
+        
+        // Bone references
+        this.bones = {};
+        
+        // Debug properties
+        this.debugMode = false;
+        
+        console.log("Zombie created at", position.x, position.y, position.z);
+    }
+    
+    async init(engine) {
+        // Store engine reference if passed
+        if (engine) this.engine = engine;
+        
+        console.log("Zombie: Initializing...");
+        
+        // Add physics body to world
+        if (this.engine.physics) {
+            this.engine.physics.addBody(this.physicsBody);
+        }
+        
+        // Load zombie model and animations
+        await this.loadModel();
+        
+        // Initial state
+        this.changeState('idle');
+        
+        return this;
+    }
+    
+    async loadModel() {
+        try {
+            // Get zombie model from asset manager
+            const zombieModel = this.engine.assetManager.getModel('zombie');
+            
+            if (!zombieModel) {
+                console.error("Zombie model not found!");
+                this.createDebugMesh();
+                return;
+            }
+            
+            // Clone model with skeleton
+            this.object = skeletonClone(zombieModel);
+            
+            // Set scale and position
+            this.object.scale.set(0.01, 0.01, 0.01);
+            this.object.position.copy(this.position);
+            
+            // Setup animation mixer
+            this.mixer = new AnimationMixer(this.object);
+            
+            // Map animations from asset manager
+            this.mapAnimations();
+            
+            // Find and cache bone references
+            this.findBones();
+            
+            // Create skeleton helper if in debug mode
+            if (this.debugMode) {
+                this.skeletonHelper = new SkeletonHelper(this.object);
+                this.engine.renderer.scene.add(this.skeletonHelper);
+            }
+            
+            // Add to scene
+            this.engine.renderer.scene.add(this.object);
+            
+        } catch (error) {
+            console.error("Failed to load zombie model:", error);
+            this.createDebugMesh();
+        }
+    }
+    
+    mapAnimations() {
+        // Animation mapping
+        const animationMap = {
+            'idle': 'idle',
+            'walk': 'walk',
+            'run': 'run',
+            'attack': 'attack',
+            'death': 'death',
+            'scream': 'scream'
+        };
+        
+        // Get animations from asset manager
+        for (const [animId, animName] of Object.entries(animationMap)) {
+            const anim = this.engine.assetManager.getAnimation(animId);
+            if (anim) {
+                this.animations[animName] = anim;
+            }
+        }
+    }
+    
+    findBones() {
+        this.bones = {};
+        
+        // Find important bones by name
+        this.object.traverse(node => {
+            if (node.isBone || node.type === 'Bone') {
+                const name = node.name.toLowerCase();
+                
+                // Store all bones by name
+                this.bones[node.name] = node;
+                
+                // Also categorize key bones
+                if (name.includes('head')) {
+                    this.bones.head = node;
+                } else if (name.includes('spine')) {
+                    this.bones.spine = node;
+                } else if (name.includes('left') && name.includes('arm')) {
+                    this.bones.leftArm = node;
+                } else if (name.includes('right') && name.includes('arm')) {
+                    this.bones.rightArm = node;
+                } else if (name.includes('left') && name.includes('leg')) {
+                    this.bones.leftLeg = node;
+                } else if (name.includes('right') && name.includes('leg')) {
+                    this.bones.rightLeg = node;
+                }
+            }
+        });
+    }
+    
+    createDebugMesh() {
+        // Create simple colored mesh as fallback
+        const bodyGeo = new BoxGeometry(0.5, 1.0, 0.3);
+        const headGeo = new BoxGeometry(0.3, 0.3, 0.3);
+        const limbGeo = new BoxGeometry(0.15, 0.5, 0.15);
+        
+        const material = new MeshStandardMaterial({ color: new Color(0x00aa00) });
+        
+        this.object = new Group();
+        this.object.position.copy(this.position);
+        
+        // Body parts
+        const body = new Mesh(bodyGeo, material);
+        body.position.y = 0.5;
+        this.object.add(body);
+        
+        const head = new Mesh(headGeo, material);
+        head.position.y = 1.15;
+        this.object.add(head);
+        
+        const leftArm = new Mesh(limbGeo, material);
+        leftArm.position.set(-0.325, 0.5, 0);
+        this.object.add(leftArm);
+        
+        const rightArm = new Mesh(limbGeo, material);
+        rightArm.position.set(0.325, 0.5, 0);
+        this.object.add(rightArm);
+        
+        const leftLeg = new Mesh(limbGeo, material);
+        leftLeg.position.set(-0.2, -0.25, 0);
+        this.object.add(leftLeg);
+        
+        const rightLeg = new Mesh(limbGeo, material);
+        rightLeg.position.set(0.2, -0.25, 0);
+        this.object.add(rightLeg);
+        
+        // Add to scene and create dummy mixer
+        this.engine.renderer.scene.add(this.object);
+        this.mixer = new AnimationMixer(this.object);
+    }
+    
+    playAnimation(name, loop = true, speedFactor = 1.0) {
+        // Skip if no mixer
+        if (!this.mixer) return;
+        
+        // Process animation name
+        let actualName = name;
+        
+        // Handle missing animations with fallbacks
+        if (name === 'idle' && !this.animations['idle']) {
+            actualName = 'walk';
+            speedFactor = 0.25;
+        }
+        else if (name === 'chase' && !this.animations['chase']) {
+            actualName = 'walk';
+            speedFactor = 1.2;
+        }
+        else if (name === 'run' && !this.animations['run']) {
+            actualName = 'walk';
+            speedFactor = 1.5;
+        }
+        
+        let clip = this.animations[actualName];
+        
+        // Try walk as fallback
+        if (!clip) {
+            actualName = 'walk';
+            clip = this.animations['walk'];
+            
+            if (!clip) return;
+        }
+        
+        // Stop current animation
+        if (this.currentAnimation) {
+            this.currentAnimation.fadeOut(0.2);
+        }
+        
+        // Create and play new animation
+        const action = this.mixer.clipAction(clip);
+        action.reset();
+        action.loop = loop ? LoopRepeat : LoopOnce;
+        action.clampWhenFinished = !loop;
+        action.timeScale = speedFactor;
+        action.fadeIn(0.2);
+        action.play();
+        
+        this.currentAnimation = action;
+    }
+    
+    update(deltaTime) {
+        if (!this.enabled || !this.isAlive) return;
+        
+        // Update timers
+        this.timeSinceSpawn += deltaTime;
+        this.timeInCurrentState += deltaTime;
+        
+        // Update animations
+        if (this.mixer) {
+            this.mixer.update(deltaTime * this.animationSpeed);
+        }
+        
+        // Update perception (can see player, etc)
+        this.updatePerception(deltaTime);
+        
+        // State machine processing
+        this.processStateMachine(deltaTime);
+        
+        // Update position from physics
+        if (this.physicsBody) {
+            this.position.copy(this.physicsBody.position);
+        }
+        
+        // Update visual position
+        if (this.object) {
+            this.object.position.copy(this.position);
+            this.object.rotation.y = this.rotation.y;
+        }
+    }
+    
+    processStateMachine(deltaTime) {
+        // State transitions - can see player should trigger chase
+        if (this.state === 'idle' && this.canSeePlayer) {
+            this.changeState('chase');
+        }
+        
+        // Process current state
+        switch (this.state) {
+            case 'idle':
+                this.processIdleState(deltaTime);
+                break;
+                
+            case 'chase':
+                this.processChaseState(deltaTime);
+                break;
+                
+            case 'attack':
+                this.processAttackState(deltaTime);
+                break;
+                
+            case 'death':
+                // No movement in death state
+                break;
+        }
+    }
+    
+    processIdleState(deltaTime) {
+        // Simple idle behavior - slight movement/looking around
+        if (Math.random() < 0.01) {
+            // Random small rotation
+            this.rotation.y += (Math.random() - 0.5) * 0.5;
+        }
+        
+        // Play idle animation
+        if (!this.currentAnimation || this.currentAnimation._clip.name !== 'idle') {
+            this.playAnimation('idle');
+        }
+    }
+    
+    processChaseState(deltaTime) {
+        // Get player position
+        const player = this.engine.player;
+        if (!player) return;
+        
+        // Store last known position when visible
+        if (this.canSeePlayer) {
+            this.lastKnownPlayerPosition = player.position.clone();
+        }
+        
+        // Move toward player
+        if (this.lastKnownPlayerPosition) {
+            // Check if close enough to attack
+            const distanceToPlayer = this.position.distanceTo(player.position);
+            
+            if (distanceToPlayer <= this.attackRange) {
+                this.changeState('attack');
+                return;
+            }
+            
+            // Calculate move direction
+            const moveDirection = new Vector3()
+                .subVectors(player.position, this.position)
+                .normalize();
+                
+            // Calculate target rotation (only Y axis)
+            const targetRotation = Math.atan2(moveDirection.x, moveDirection.z);
+            
+            // Smooth rotation toward player
+            let currentRotation = this.rotation.y;
+            while (currentRotation > Math.PI) currentRotation -= Math.PI * 2;
+            while (currentRotation < -Math.PI) currentRotation += Math.PI * 2;
+            
+            let targetRotNormalized = targetRotation;
+            while (targetRotNormalized > Math.PI) targetRotNormalized -= Math.PI * 2;
+            while (targetRotNormalized < -Math.PI) targetRotNormalized += Math.PI * 2;
+            
+            // Calculate shortest rotation direction
+            let rotDiff = targetRotNormalized - currentRotation;
+            if (rotDiff > Math.PI) rotDiff -= Math.PI * 2;
+            if (rotDiff < -Math.PI) rotDiff += Math.PI * 2;
+            
+            // Apply rotation with turn speed
+            this.rotation.y += rotDiff * Math.min(this.turnSpeed * deltaTime, 1.0);
+            
+            // Get forward vector based on current rotation
+            const forward = new Vector3(
+                Math.sin(this.rotation.y),
+                0,
+                Math.cos(this.rotation.y)
+            );
+            
+            // Set velocity to move forward
+            const chaseSpeed = 3.0; // Adjust speed as needed
+            
+            if (this.physicsBody) {
+                this.physicsBody.velocity.x = forward.x * chaseSpeed;
+                this.physicsBody.velocity.z = forward.z * chaseSpeed;
+            }
+            
+            // Play walk/run animation
+            if (!this.currentAnimation || 
+                (this.currentAnimation._clip.name !== 'walk' && 
+                 this.currentAnimation._clip.name !== 'run')) {
+                this.playAnimation('walk', true, 1.2);
+            }
+        }
+        
+        // If lost track of player for too long, go back to idle
+        if (!this.canSeePlayer && this.timeInCurrentState > 8.0) {
+            this.changeState('idle');
+        }
+    }
+    
+    processAttackState(deltaTime) {
+        const player = this.engine.player;
+        if (!player) return;
+        
+        // Check distance to player
+        const distanceToPlayer = this.position.distanceTo(player.position);
+        
+        // If player moved away, go back to chase
+        if (distanceToPlayer > this.attackRange * 1.2) {
+            this.changeState('chase');
+            return;
+        }
+        
+        // Face the player
+        this.lookAt(player.position);
+        
+        // Execute attack with cooldown
+        if (this.timeSinceSpawn - this.lastAttackTime > this.attackCooldown) {
+            // Play attack animation
+            this.playAnimation('attack', false);
+            
+            // Deal damage at appropriate time in animation (after 0.5s)
+            setTimeout(() => {
+                if (this.state === 'attack' && player.takeDamage && 
+                    this.position.distanceTo(player.position) <= this.attackRange) {
+                    player.takeDamage(20, this);
+                }
+            }, 500);
+            
+            this.lastAttackTime = this.timeSinceSpawn;
+            
+            // Return to chase after attack completes
+            setTimeout(() => {
+                if (this.state === 'attack') {
+                    this.changeState('chase');
+                }
+            }, 1200);
+        }
+    }
+    
+    // Check if zombie can see player
+    updatePerception(deltaTime) {
+        // Only update perception periodically
+        this.updatePerceptionTime -= deltaTime;
+        if (this.updatePerceptionTime <= 0) {
+            this.updatePerceptionTime = this.perceptionUpdateRate;
+            
+            // Reset perception
+            const previouslyCouldSeePlayer = this.canSeePlayer;
+            this.canSeePlayer = false;
+            
+            // Get player
+            const player = this.engine.player;
+            if (!player) return;
+            
+            // Check distance to player
+            const distanceToPlayer = this.position.distanceTo(player.position);
+            
+            // If within detection range, can see player
+            if (distanceToPlayer <= this.detectionRange) {
+                // Simple line of sight check (no obstacles for simplicity)
+                this.canSeePlayer = true;
+                
+                // If just spotted player, react
+                if (!previouslyCouldSeePlayer && this.state === 'idle') {
+                    this.onPlayerSpotted();
+                }
+            }
+        }
+    }
+    
+    onPlayerSpotted() {
+        // React to seeing player - change state to chase
+        this.changeState('chase');
+    }
+    
+    // Look at a target position
+    lookAt(targetPos) {
+        // Calculate direction to target (XZ plane only)
+        const direction = new Vector3()
+            .subVectors(targetPos, this.position)
+            .setY(0)
+            .normalize();
+            
+        // Set rotation based on direction
+        this.rotation.y = Math.atan2(direction.x, direction.z);
+        
+        // Update object rotation
+        if (this.object) {
+            this.object.rotation.y = this.rotation.y;
+        }
+    }
+    
+    // Change state with animation transitions
+    changeState(newState) {
+        if (newState === this.state) return;
+        
+        const oldState = this.state;
+        this.state = newState;
+        this.timeInCurrentState = 0;
+        
+        console.log(`Zombie ${this.id} state: ${oldState} -> ${newState}`);
+        
+        // State-specific setup
+        switch (newState) {
+            case 'idle':
+                this.playAnimation('idle', true);
+                if (this.physicsBody) {
+                    this.physicsBody.velocity.set(0, this.physicsBody.velocity.y, 0);
+                }
+                break;
+                
+            case 'chase':
+                this.playAnimation('walk', true, 1.2);
+                break;
+                
+            case 'attack':
+                this.playAnimation('attack', false);
+                if (this.physicsBody) {
+                    this.physicsBody.velocity.set(0, this.physicsBody.velocity.y, 0);
+                }
+                break;
+                
+            case 'death':
+                this.playAnimation('death', false);
+                this.isAlive = false;
+                if (this.physicsBody) {
+                    this.physicsBody.velocity.set(0, 0, 0);
+                }
+                break;
+        }
+    }
+    
+    // Handle taking damage
+    takeDamage(amount) {
+        this.health -= amount;
+        
+        // Play hit reaction
+        if (this.health <= 0 && this.isAlive) {
+            this.changeState('death');
+        }
+    }
+    
+    // Required method for EntityManager
+    destroy() {
+        // Remove from scene
+        if (this.object) {
+            this.engine.renderer.scene.remove(this.object);
+        }
+        
+        if (this.skeletonHelper) {
+            this.engine.renderer.scene.remove(this.skeletonHelper);
+        }
+        
+        // Remove physics body
+        if (this.physicsBody && this.engine.physics) {
+            this.engine.physics.removeBody(this.physicsBody);
+        }
+        
+        // Clear animation data
+        if (this.mixer) {
+            this.mixer.stopAllAction();
+        }
+        
+        this.animations = {};
+        this.currentAnimation = null;
+        this.enabled = false;
+    }
+    
+    // For compatibility with EnemyManager
+    canSensePlayer() {
+        return this.canSeePlayer;
+    }
+    
+    canAttackTarget() {
+        if (!this.engine.player) return false;
+        
+        const distanceToPlayer = this.position.distanceTo(this.engine.player.position);
+        return distanceToPlayer <= this.attackRange;
+    }
 }
