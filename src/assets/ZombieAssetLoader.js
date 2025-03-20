@@ -1,5 +1,5 @@
 // src/assets/ZombieAssetLoader.js
-import { AnimationClip, Mesh, MeshStandardMaterial, Color } from 'three';
+import { AnimationClip, Mesh, MeshStandardMaterial, Color, BoxGeometry } from 'three';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 
 export class ZombieAssetLoader {
@@ -14,17 +14,27 @@ export class ZombieAssetLoader {
             
             // Use exact paths to your FBX files
             const modelPath = 'assets/models/zombie/zombie.fbx';
+            console.log(`Attempting to load zombie model from: ${modelPath}`);
+            
             const animationPaths = {
-                'zombie_idle': 'assets/models/zombie/idle.fbx',
-                'zombie_walk': 'assets/models/zombie/walk.fbx',
-                'zombie_run': 'assets/models/zombie/run.fbx',
-                'zombie_attack': 'assets/models/zombie/attack.fbx',
-                'zombie_death': 'assets/models/zombie/death.fbx'
+                'idle': 'assets/models/zombie/idle.fbx',
+                'walk': 'assets/models/zombie/walk.fbx',
+                'run': 'assets/models/zombie/run.fbx',
+                'attack': 'assets/models/zombie/attack.fbx',
+                'death': 'assets/models/zombie/death.fbx',
+                'dying': 'assets/models/zombie/dying.fbx',
+                'biting': 'assets/models/zombie/biting.fbx',
+                'biting2': 'assets/models/zombie/biting2.fbx',
+                'crawl': 'assets/models/zombie/crawl.fbx',
+                'runningcrawl': 'assets/models/zombie/runningcrawl.fbx',
+                'neckbite': 'assets/models/zombie/neckbite.fbx',
+                'scream': 'assets/models/zombie/scream.fbx'
             };
             
             // Load the zombie model first
-            console.log("Loading zombie model...");
+            console.log(`Beginning zombie model load from ${modelPath}`);
             const zombieModel = await this.loadFBXModel(modelPath);
+            console.log(`Model loaded successfully:`, !!zombieModel);
             
             // CRITICAL: Process the model to ensure proper scale and visibility
             this.processZombieModel(zombieModel);
@@ -36,7 +46,7 @@ export class ZombieAssetLoader {
             console.log("Loading zombie animations...");
             
             for (const [animId, animPath] of Object.entries(animationPaths)) {
-                await this.loadFBXAnimation(animPath, animId);
+                await this.loadFBXAnimation(animPath, animId, zombieModel);
             }
             
             console.log("Zombie assets loaded successfully");
@@ -86,7 +96,7 @@ export class ZombieAssetLoader {
         if (!hasMeshes) {
             // Create a simple mesh to represent the zombie if no meshes found
             const zombieMesh = new Mesh(
-                new THREE.BoxGeometry(0.5, 1.5, 0.5),
+                new BoxGeometry(0.5, 1.5, 0.5),
                 new MeshStandardMaterial({ color: new Color(0x00ff00) })
             );
             zombieMesh.position.y = 0.75;
@@ -137,12 +147,7 @@ export class ZombieAssetLoader {
     async loadFBXAnimation(path, animId) {
         try {
             const fbxData = await new Promise((resolve, reject) => {
-                this.fbxLoader.load(
-                    path,
-                    (fbx) => resolve(fbx),
-                    undefined,
-                    (error) => reject(error)
-                );
+                this.fbxLoader.load(path, resolve, undefined, reject);
             });
             
             if (fbxData.animations && fbxData.animations.length > 0) {
@@ -150,6 +155,15 @@ export class ZombieAssetLoader {
                 
                 // Set the animation ID as the name
                 anim.name = animId;
+                
+                // Process the animation to ensure compatibility
+                // This is critical for proper retargeting
+                anim.tracks = anim.tracks.filter(track => {
+                    // Keep only valid tracks that match bone naming patterns
+                    return track.name.includes('.quaternion') || 
+                           track.name.includes('.position') || 
+                           track.name.includes('.scale');
+                });
                 
                 // Store in asset manager
                 this.assetManager.animations.set(animId, anim);
